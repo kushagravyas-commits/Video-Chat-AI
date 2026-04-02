@@ -1,0 +1,37 @@
+# Core (FastAPI >=0.100 needs Pydantic v2 — required by chromadb>=1.x)
+fastapi==0.115.6
+uvicorn==0.24.0
+python-multipart==0.0.22
+python-dotenv==1.0.0
+pydantic>=2.12,<3
+
+# Video Processing
+yt-dlp>=2026.2.20
+ffmpeg-python>=0.2.0
+moviepy>=1.0.0
+opencv-python>=4.8.0
+
+# Audio & Transcription
+openai-whisper>=20231117
+librosa==0.10.0
+
+# Embeddings (Local - NO API CALLS!)
+sentence-transformers>=2.2.0
+
+# Speech Recognition (optional)
+# pyannote.audio==2.1.1  # For speaker diarization
+
+# Open Router
+# (Uses requests library - already included below)
+
+# Vector Storage (must match on-disk ./chroma_data format; corruption → run scripts/reset_chroma_data.py)
+chromadb==1.5.4
+
+# Database (optional)
+# pymongo==4.6.0  # Commented out, using Chroma DB instead
+# psycopg2-binary==2.9.9  # For PostgreSQL if needed
+
+# Utilities
+requests==2.31.0
+numpy==1.24.0
+scipy==1.11.0
