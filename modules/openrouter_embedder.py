@@ -288,6 +288,50 @@ class OpenRouterEmbedder:
 
         return embeddings
 
+    # ─── FRAME DESCRIPTION (Vision LLM) ────────────────────────────────
+
+    def describe_image(self, image_path: str) -> str:
+        """
+        Describe a video keyframe using a vision LLM via OpenRouter.
+        Returns a text description of what's visible in the image.
+        Used to store alongside visual embeddings for RAG context.
+        """
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        ext = os.path.splitext(image_path)[1].lower()
+        mime_type = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}.get(ext, "image/jpeg")
+
+        try:
+            response = self.client.chat.completions.create(
+                model="bytedance-seed/seed-2.0-mini",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this video frame in 1-2 sentences. Focus on: people, text on screen, charts/graphics, locations, actions, objects. Be specific and factual."},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}}
+                    ]
+                }],
+                max_tokens=150,
+                temperature=0.2
+            )
+            description = response.choices[0].message.content.strip()
+            logger.debug(f"Frame description: {description[:80]}...")
+            return description
+        except Exception as e:
+            logger.error(f"Frame description failed: {e}")
+            return "Video frame (description unavailable)"
+
+    def describe_image_batch(self, image_paths: List[str], rate_limit_delay: float = 1.0) -> List[str]:
+        """Describe multiple keyframes with rate limiting."""
+        descriptions = []
+        for i, path in enumerate(image_paths):
+            desc = self.describe_image(path)
+            descriptions.append(desc)
+            if i < len(image_paths) - 1:
+                time.sleep(rate_limit_delay)
+        return descriptions
+
     # ─── UTILITIES ───────────────────────────────────────────────────────
 
     def test_connection(self) -> Dict:

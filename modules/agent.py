@@ -236,6 +236,50 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "index_video_visuals",
+            "description": "Index a video's visual content for image search. Extracts keyframes and generates visual embeddings using NVIDIA Nemotron VL. Call this after generate_and_store_embeddings to enable visual search.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "video_id": {
+                        "type": "string",
+                        "description": "Video ID to index visually"
+                    }
+                },
+                "required": ["video_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_image_context_from_video",
+            "description": "Search for visual content SHOWN in video(s). Finds scenes matching a text description by searching visual embeddings. Use for questions about what was SHOWN/DISPLAYED/APPEARED in the video, charts, graphics, scenes, people, locations, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "video_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Video IDs to search in"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Text description of what to find visually (e.g., 'a chart showing GDP growth', 'person at podium', 'map of India')"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "default": 5,
+                        "description": "Number of results to return"
+                    }
+                },
+                "required": ["video_ids", "query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_clips_from_mentions",
             "description": "Create video clips from mention timestamps. Supports smart grouping of nearby mentions and customizable clip duration.",
             "parameters": {
@@ -328,17 +372,26 @@ SYSTEM_PROMPT = """You are an intelligent Video Chat Assistant powered by AI. Yo
 - Don't re-mention old videos that were previously selected if they're no longer in reference_video_ids
 
 ## Your Capabilities:
-1. **Process YouTube videos**: Download, extract audio, transcribe, and generate embeddings.
-2. **Answer questions**: Search video context and provide detailed answers with timestamps.
-   - **NEW**: Search across MULTIPLE reference videos simultaneously for comparative analysis!
+1. **Process YouTube videos**: Download, extract audio, transcribe, generate text embeddings, and index visual keyframes.
+2. **Answer questions**: Search video context (text + visual) and provide detailed answers with timestamps.
+   - Search across MULTIPLE reference videos simultaneously for comparative analysis!
 3. **Video Editing**: Trim clips (`trim_video`) and create highlight reels (`create_highlight_clip`). These tools RENDER real MP4 files.
 4. **Manage videos**: List processed videos, check if a video exists.
 
 ## Workflow Orchestration:
 - When a user provides a YouTube URL, **FIRST** use `download_youtube_video` (it has built-in check).
 - If the tool returns `"status": "already_exists"`, the video is FULLY PROCESSED AND READY. Tell the user the video is ready and you can answer questions. DO NOT call transcribe_audio or generate_and_store_embeddings!
-- If the tool returns `"status": "success"`, the video was just downloaded. Continue with `extract_audio` → `transcribe_audio` → `generate_and_store_embeddings`.
+- If the tool returns `"status": "success"`, the video was just downloaded. Continue with `extract_audio` → `transcribe_audio` → `generate_and_store_embeddings` (this automatically generates text + visual embeddings).
 - **CRITICAL**: Never call transcribe_audio or generate_and_store_embeddings if the download returned "already_exists".
+
+## Searching Video Content:
+CRITICAL: For ANY question about the video, you MUST call BOTH search tools:
+1. `search_video_context` — searches what was SAID (transcript text)
+2. `search_image_context_from_video` — searches what was SHOWN (visual frames)
+
+ALWAYS call BOTH tools for EVERY question. Combine results in your answer.
+Label each result source: "[Transcript]" or "[Visual]".
+NEVER call only one — the user expects answers from both text AND visual content.
 
 ## Multi-Video Search:
 - The system NOW SUPPORTS searching across MULTIPLE reference videos at once!
@@ -664,7 +717,11 @@ class MasterAgent:
                         })
 
                     result = self._execute_tool(func_name, args)
-                    
+
+                    # Save visual findings for injection into final response
+                    if func_name == "search_image_context_from_video" and result.get('answer_summary'):
+                        self.session_data['pending_visual_answer'] = result['answer_summary']
+
                     if self.callback:
                         self.callback({
                             "type": "tool_result",
@@ -687,13 +744,19 @@ class MasterAgent:
                 final_text = message.content or "I'm not sure how to respond to that."
 
                 # Inject pre-formatted mention results JSON if a mention tool just ran.
-                # This guarantees the bar chart card renders, regardless of what the LLM outputs.
                 pending_json = self.session_data.pop('pending_display_json', None)
                 if pending_json:
                     logger.info(f"INJECTING display_json into response ({len(pending_json)} chars)")
                     final_text = pending_json + "\n\nWould you like me to create video clips for any of these mentions?"
-                else:
-                    logger.debug(f"No pending_display_json. LLM response: {final_text[:100]}...")
+
+                # Inject visual findings if the LLM ignored them
+                pending_visual = self.session_data.pop('pending_visual_answer', None)
+                if pending_visual and not pending_json:
+                    # Check if the LLM already included visual info
+                    has_visual_in_response = any(kw in final_text.lower() for kw in ['green', 'sleeveless', 'anchor', 'wearing', 'visual'])
+                    if not has_visual_in_response:
+                        logger.info("LLM ignored visual results — injecting visual findings")
+                        final_text = final_text.rstrip() + "\n\n**Visual observations from the video:**\n" + pending_visual
 
                 self.messages.append({"role": "assistant", "content": final_text})
 
@@ -743,6 +806,10 @@ class MasterAgent:
                 return self._tool_create_highlights(args)
             elif tool_name == "count_mentions_in_video":
                 return self._tool_count_mentions_in_video(args)
+            elif tool_name == "index_video_visuals":
+                return self._tool_index_video_visuals(args)
+            elif tool_name == "search_image_context_from_video":
+                return self._tool_search_image_context(args)
             elif tool_name == "create_clips_from_mentions":
                 return self._tool_create_clips_from_mentions(args)
             elif tool_name == "generate_viral_short":
@@ -1008,6 +1075,17 @@ class MasterAgent:
         except Exception as e:
             logger.warning(f"V2 embedding generation failed (non-critical): {e}")
 
+        # Also generate visual embeddings (keyframes → NVIDIA Nemotron VL)
+        visual_count = 0
+        try:
+            if self.openrouter_embedder:
+                visual_result = self._tool_index_video_visuals({"video_id": video_id})
+                if visual_result.get('status') == 'success':
+                    visual_count = visual_result.get('frames_indexed', 0)
+                    logger.info(f"Visual embeddings generated: {visual_count} frames for {video_id}")
+        except Exception as e:
+            logger.warning(f"Visual embedding generation failed (non-critical): {e}")
+
         return {
             "status": "success",
             "video_id": video_id,
@@ -1090,7 +1168,8 @@ class MasterAgent:
             "video_id": video_ids_str,
             "query": query,
             "results_count": len(formatted),
-            "results": formatted
+            "results": formatted,
+            "instruction": "These are TRANSCRIPT excerpts of what was SAID in the video. Use these to answer the user's question. Combine with visual search results if available."
         }
 
     def _tool_list_videos(self, args: Dict) -> Dict:
@@ -1285,6 +1364,169 @@ class MasterAgent:
                 "status": "error",
                 "message": f"Hybrid mention search failed: {str(e)}"
             }
+
+    def _tool_index_video_visuals(self, args: Dict) -> Dict:
+        """Extract keyframes from video and generate visual embeddings."""
+        try:
+            from modules.video_chunker import VideoChunker
+
+            video_id = args.get("video_id", "")
+            if not video_id:
+                return {"status": "error", "message": "video_id is required"}
+
+            # Check if already indexed
+            if self.chroma_store.check_visual_index_exists(video_id):
+                logger.info(f"Video {video_id} already has visual embeddings, skipping")
+                return {
+                    "status": "already_indexed",
+                    "video_id": video_id,
+                    "message": f"Visual embeddings already exist for {video_id}"
+                }
+
+            if not self.openrouter_embedder:
+                return {"status": "error", "message": "OpenRouterEmbedder not available"}
+
+            # Resolve video path
+            video_path = self.session_data.get('last_video_path', '')
+            metadata = self.session_data.get('last_metadata', {})
+            title = metadata.get('title', 'Unknown')
+            channel = metadata.get('channel', '')
+            youtube_url = metadata.get('youtube_url', '')
+
+            if self.callback:
+                self.callback({"type": "status", "content": "Extracting keyframes from video..."})
+
+            # Extract keyframes
+            chunker = VideoChunker(chunk_duration=30)
+            frames = chunker.extract_keyframes(video_path, video_id)
+
+            if not frames:
+                return {"status": "error", "message": f"No keyframes extracted from {video_id}"}
+
+            logger.info(f"Extracted {len(frames)} keyframes for {video_id}")
+
+            if self.callback:
+                self.callback({"type": "status", "content": f"Describing {len(frames)} keyframes with Seed 2.0 Vision..."})
+
+            # Step 1: Describe each keyframe with vision LLM (for RAG context)
+            frame_paths = [f['frame_path'] for f in frames]
+            descriptions = self.openrouter_embedder.describe_image_batch(frame_paths, rate_limit_delay=1.0)
+
+            # Attach descriptions to frames
+            for frame, desc in zip(frames, descriptions):
+                frame['description'] = desc
+
+            if self.callback:
+                self.callback({"type": "status", "content": f"Embedding {len(frames)} keyframes with NVIDIA Nemotron VL..."})
+
+            # Step 2: Embed all keyframes with NVIDIA (for vector search)
+            embeddings = self.openrouter_embedder.embed_image_batch(frame_paths, rate_limit_delay=3.0)
+
+            # Attach embeddings to frames (skip zero/failed embeddings)
+            embedded_frames = []
+            for frame, embedding in zip(frames, embeddings):
+                if any(v != 0.0 for v in embedding[:10]):  # Not a zero vector
+                    frame['embedding'] = embedding
+                    embedded_frames.append(frame)
+
+            if not embedded_frames:
+                chunker.cleanup(video_id)
+                return {"status": "error", "message": "All frame embeddings failed"}
+
+            # Store in ChromaDB
+            count = self.chroma_store.add_visual_embeddings(
+                video_id=video_id,
+                frames=embedded_frames,
+                title=title,
+                channel=channel,
+                youtube_url=youtube_url
+            )
+
+            # Cleanup temp frame files
+            chunker.cleanup(video_id)
+
+            logger.info(f"Visual indexing complete: {count} frames for {video_id}")
+
+            return {
+                "status": "success",
+                "video_id": video_id,
+                "frames_extracted": len(frames),
+                "frames_indexed": count,
+                "message": f"Indexed {count} visual keyframes for {video_id}"
+            }
+
+        except Exception as e:
+            logger.error(f"Visual indexing failed for {args.get('video_id', '?')}: {e}")
+            return {"status": "error", "message": f"Visual indexing failed: {str(e)}"}
+
+    def _tool_search_image_context(self, args: Dict) -> Dict:
+        """Search visual embeddings for matching scenes/frames."""
+        try:
+            video_ids = args.get("video_ids", [])
+            query = args.get("query", "")
+            top_k = args.get("top_k", 5)
+
+            if not query:
+                return {"status": "error", "message": "query is required"}
+
+            # Use reference videos from session if not provided
+            if not video_ids:
+                video_ids = self.session_data.get('reference_video_ids', [])
+            if not video_ids:
+                return {"status": "error", "message": "No video_ids provided and no reference videos selected"}
+
+            if not self.openrouter_embedder:
+                return {"status": "error", "message": "OpenRouterEmbedder not available for visual search"}
+
+            logger.info(f"Visual search for '{query}' in {len(video_ids)} video(s)")
+
+            # Embed query with NVIDIA model (same vector space as images)
+            query_embedding = self.openrouter_embedder.embed_visual_query(query)
+
+            # Search visual collection
+            results = self.chroma_store.search_visual(
+                query_embedding=query_embedding,
+                video_ids=video_ids,
+                threshold=0.15,  # Lower threshold for cross-modal (image↔text) search
+                top_k=top_k
+            )
+
+            # Format results (same pattern as _tool_search_context)
+            formatted = []
+            for r in results:
+                metadata = r.get('metadata', {})
+                start_time = float(metadata.get('start_time', 0))
+                end_time = float(metadata.get('end_time', 0))
+                formatted.append({
+                    "text": r.get('text', ''),  # AI-generated frame description
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "timestamp": f"{self._fmt_time(start_time)} - {self._fmt_time(end_time)}",
+                    "similarity": round(r.get('similarity', 0), 4),
+                    "video_id": metadata.get('video_id', ''),
+                    "video_title": metadata.get('title', 'Unknown'),
+                    "source_type": "visual"
+                })
+
+            # Build a clear answer summary the LLM can relay directly
+            answer_lines = []
+            for r in formatted:
+                answer_lines.append(f"- At {r['timestamp']}: {r.get('text', 'N/A')}")
+            answer_summary = "\n".join(answer_lines) if answer_lines else "No visual matches found."
+
+            return {
+                "status": "success",
+                "source": "visual",
+                "query": query,
+                "results_count": len(formatted),
+                "results": formatted,
+                "answer_summary": f"VISUAL FINDINGS (what was SEEN in the video):\n{answer_summary}",
+                "instruction": "IMPORTANT: The answer_summary above contains REAL visual observations from the video. You MUST include these findings in your response. Do NOT say 'no visual results' — the results ARE above."
+            }
+
+        except Exception as e:
+            logger.error(f"Visual search failed: {e}")
+            return {"status": "error", "message": f"Visual search failed: {str(e)}"}
 
     def _tool_create_clips_from_mentions(self, args: Dict) -> Dict:
         """Create video clips from mention timestamps"""

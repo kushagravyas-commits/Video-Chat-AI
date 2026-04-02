@@ -532,6 +532,9 @@ async def agent_chat(request_data: ChatAgentRequest):
         if request_data.clear_history:
             agent_service.clear_conversation()
 
+        # DEBUG: Log what the frontend sends
+        logger.info(f"[AGENT-CHAT] query='{request_data.query}', video_id={request_data.video_id}, video_ids={request_data.video_ids}")
+
         # Store reference video IDs in session for multi-video search
         if request_data.video_ids and len(request_data.video_ids) > 0:
             agent_service.session_data['reference_video_ids'] = request_data.video_ids

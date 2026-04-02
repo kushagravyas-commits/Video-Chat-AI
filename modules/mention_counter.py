@@ -79,7 +79,14 @@ class MentionCounter:
                         search_query=search_query,
                         confidence_threshold=confidence_threshold
                     )
-                    mentions = self._merge_mentions(regex_mentions, semantic_mentions)
+                    visual_mentions = self._search_video_visual(
+                        video_id=video_id,
+                        search_query=search_query,
+                        confidence_threshold=confidence_threshold
+                    )
+                    text_merged = self._merge_mentions(regex_mentions, semantic_mentions)
+                    # Visual results don't overlap with text — just append and sort
+                    mentions = sorted(text_merged + visual_mentions, key=lambda x: x['start_time'])
                 else:
                     # Pure regex/keyword search (existing behavior)
                     mentions = self._search_video_text(
@@ -417,6 +424,64 @@ class MentionCounter:
 
         except Exception as e:
             logger.error(f"V1 semantic fallback failed for {video_id}: {e}")
+            return []
+
+    def _search_video_visual(
+        self,
+        video_id: str,
+        search_query: str,
+        confidence_threshold: float = 0.3
+    ) -> List[Dict]:
+        """
+        Search visual embeddings for matching frames/scenes.
+        Uses NVIDIA Nemotron VL (same vector space for text and images).
+        Returns empty list if visual index doesn't exist (non-blocking).
+        """
+        try:
+            if not self.openrouter_embedder:
+                return []
+
+            if not self.chroma_store.check_visual_index_exists(video_id):
+                logger.info(f"No visual index for {video_id} — skipping visual search")
+                return []
+
+            logger.info(f"Visual search in video {video_id} for '{search_query}'")
+
+            # Embed query with NVIDIA model (same vector space as image embeddings)
+            query_embedding = self.openrouter_embedder.embed_visual_query(search_query)
+
+            results = self.chroma_store.search_visual(
+                query_embedding=query_embedding,
+                video_ids=[video_id],
+                threshold=min(confidence_threshold, 0.15),  # Cross-modal needs lower threshold
+                top_k=50
+            )
+
+            mentions = []
+            for r in results:
+                metadata = r.get('metadata', {})
+                start_time = float(metadata.get('start_time', 0))
+                end_time = float(metadata.get('end_time', start_time + 30))
+
+                mentions.append({
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "timestamp_formatted": f"{self._seconds_to_time(start_time)} - {self._seconds_to_time(end_time)}",
+                    "text": f"[Visual] {r.get('text', 'Scene at ' + self._seconds_to_time(start_time))}",
+                    "matched_text": search_query,
+                    "confidence": round(r.get('similarity', 0), 4),
+                    "match_type": "visual",
+                    "video_id": video_id,
+                    "title": metadata.get('title', 'Unknown'),
+                    "chunk_id": r.get('chunk_id', '')
+                })
+
+            mentions.sort(key=lambda x: x['start_time'])
+            logger.info(f"Visual search found {len(mentions)} matches in {video_id}")
+            return mentions
+
+        except Exception as e:
+            logger.error(f"Visual search failed for {video_id}: {e}")
             return []
 
     def _merge_mentions(

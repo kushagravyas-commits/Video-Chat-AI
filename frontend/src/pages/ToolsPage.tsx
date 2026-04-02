@@ -1,5 +1,5 @@
 import React from 'react';
-import { Wrench, Search, Zap, MessageSquare, Scissors, Video, BarChart2, Film, Sparkles } from 'lucide-react';
+import { Wrench, Search, Zap, MessageSquare, Scissors, Video, BarChart2, Film, Sparkles, Eye, ImageIcon, Languages } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import Navigation from '../components/Navigation';
@@ -64,6 +64,27 @@ const TOOLS = [
         description: 'AI Director scans for viral hooks and creates optimized 9:16 vertical shorts for social media.',
         icon: Sparkles,
         color: 'rose'
+    },
+    {
+        id: 9,
+        name: 'Visual Scene Search',
+        description: 'Search what was SHOWN in the video — charts, graphics, scenes, people, locations. Uses NVIDIA multimodal AI to understand visual content.',
+        icon: Eye,
+        color: 'violet'
+    },
+    {
+        id: 10,
+        name: 'Visual Indexing',
+        description: 'Automatically extracts keyframes from videos and generates visual embeddings. Enables image-based search across all your video content.',
+        icon: ImageIcon,
+        color: 'amber'
+    },
+    {
+        id: 11,
+        name: 'Auto Language Detection',
+        description: 'Automatically detects video language and translates non-English transcripts to English using Google Gemini. Supports Hindi, Urdu, and 50+ languages.',
+        icon: Languages,
+        color: 'teal'
     }
 ];
 
@@ -78,7 +99,10 @@ export default function ToolsPage() {
         orange: { bg: 'bg-orange-500/20', text: 'text-orange-400', border: 'border-orange-500/20' },
         emerald: { bg: 'bg-emerald-500/20', text: 'text-emerald-400', border: 'border-emerald-500/20' },
         indigo: { bg: 'bg-indigo-500/20', text: 'text-indigo-400', border: 'border-indigo-500/20' },
-        rose: { bg: 'bg-rose-500/20', text: 'text-rose-400', border: 'border-rose-500/20' }
+        rose: { bg: 'bg-rose-500/20', text: 'text-rose-400', border: 'border-rose-500/20' },
+        violet: { bg: 'bg-violet-500/20', text: 'text-violet-400', border: 'border-violet-500/20' },
+        amber: { bg: 'bg-amber-500/20', text: 'text-amber-400', border: 'border-amber-500/20' },
+        teal: { bg: 'bg-teal-500/20', text: 'text-teal-400', border: 'border-teal-500/20' }
     };
 
     return (
@@ -219,6 +243,20 @@ export default function ToolsPage() {
                                 <p className="font-semibold text-sm mb-2">Q&A</p>
                                 <p className="text-sm opacity-75">
                                     "What are the main conclusions from this discussion?"
+                                </p>
+                            </div>
+
+                            <div className={cn('p-4 rounded-lg', isDark ? 'bg-slate-700/20' : 'bg-slate-300/20')}>
+                                <p className="font-semibold text-sm mb-2">Visual Search</p>
+                                <p className="text-sm opacity-75">
+                                    "Was there a map or chart shown in the video?"
+                                </p>
+                            </div>
+
+                            <div className={cn('p-4 rounded-lg', isDark ? 'bg-slate-700/20' : 'bg-slate-300/20')}>
+                                <p className="font-semibold text-sm mb-2">Semantic Mentions</p>
+                                <p className="text-sm opacity-75">
+                                    "How many times does the speaker discuss economic policy?"
                                 </p>
                             </div>
                         </div>

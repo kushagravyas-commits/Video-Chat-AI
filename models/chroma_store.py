@@ -77,6 +77,8 @@ class ChromaStore:
                 name=collection_name,
                 metadata=metadata or {"description": f"Collection for {collection_name}"}
             )
+            # Fix ChromaDB 0.5.23 empty config bug
+            self._fix_collection_config(collection_name, "l2")
             logger.info(f"Collection '{collection_name}' ready for use")
             return collection
 
@@ -340,7 +342,8 @@ class ChromaStore:
         """
         try:
             collections = self.client.list_collections()
-            collection_names = [c.name for c in collections]
+            # ChromaDB 0.6+ returns strings directly, 0.5.x returned objects with .name
+            collection_names = [c if isinstance(c, str) else c.name for c in collections]
             logger.info(f"Found {len(collection_names)} collections")
             return collection_names
 
@@ -539,11 +542,40 @@ class ChromaStore:
     # ─── V2 TEXT EMBEDDINGS (Qwen3-Embedding-8B, 2048-dim) ──────────────
 
     def _get_or_create_cosine_collection(self, collection_name: str):
-        """Get or create a collection with cosine distance metric (proper for normalized embeddings)."""
-        return self.client.get_or_create_collection(
+        """Get or create a collection with cosine distance metric."""
+        collection = self.client.get_or_create_collection(
             name=collection_name,
             metadata={"hnsw:space": "cosine"}
         )
+        # Fix ChromaDB 0.5.23 bug: patch empty config_json_str to prevent _type KeyError
+        self._fix_collection_config(collection_name, "cosine")
+        return collection
+
+    def _fix_collection_config(self, collection_name: str, space: str = "cosine"):
+        """Patch empty config_json_str in ChromaDB SQLite to prevent _type KeyError."""
+        try:
+            import sqlite3, json
+            db_path = os.path.join(self.persist_dir, "chroma.sqlite3")
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT config_json_str FROM collections WHERE name = ?", (collection_name,))
+            row = cursor.fetchone()
+            if row and (not row[0] or row[0] == '{}'):
+                config = json.dumps({
+                    "hnsw_configuration": {
+                        "space": space, "ef_construction": 100, "ef_search": 10,
+                        "num_threads": 8, "M": 16, "resize_factor": 1.2,
+                        "batch_size": 100, "sync_threshold": 1000,
+                        "_type": "HNSWConfigurationInternal"
+                    },
+                    "_type": "CollectionConfigurationInternal"
+                })
+                cursor.execute("UPDATE collections SET config_json_str = ? WHERE name = ?", (config, collection_name))
+                conn.commit()
+                logger.info(f"Fixed empty config for collection '{collection_name}'")
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Config fix skipped for {collection_name}: {e}")
 
     def add_embeddings_v2(
         self,
@@ -655,6 +687,12 @@ class ChromaStore:
                             )
 
                             if results['ids'] and len(results['ids']) > 0:
+                                # DEBUG: Log raw distances to diagnose L2 vs cosine
+                                if results['distances'][0]:
+                                    raw_dists = results['distances'][0][:3]
+                                    raw_sims = [1 - d for d in raw_dists]
+                                    logger.info(f"[DEBUG] {collection_name} raw distances: {raw_dists}, sims: {raw_sims}")
+
                                 for i, chunk_id in enumerate(results['ids'][0]):
                                     similarity = 1 - results['distances'][0][i]
                                     if similarity >= threshold:
@@ -666,8 +704,8 @@ class ChromaStore:
                                         })
                                 break
                         except Exception as e:
-                            logger.debug(
-                                f"Cosine query failed for {video_id} in '{collection_name}': {e}"
+                            logger.error(
+                                f"Cosine query FAILED for {video_id} in '{collection_name}': {e}"
                             )
                             continue
             else:
@@ -745,11 +783,12 @@ class ChromaStore:
                     'end_time': str(frame.get('end_time', 0)),
                     'source_type': 'visual',
                 })
-                # Document text = time range description (for debugging)
-                documents.append(
+                # Document text = AI-generated description of the frame (for RAG context)
+                description = frame.get('description',
                     f"Visual frame {frame['chunk_index']}: "
                     f"{frame.get('start_time', 0):.1f}s - {frame.get('end_time', 0):.1f}s"
                 )
+                documents.append(description)
 
             collection.add(
                 ids=ids,
