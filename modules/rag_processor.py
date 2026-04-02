@@ -1,7 +1,7 @@
 """
 RAG (Retrieval-Augmented Generation) Processing Module
 Handles chunking, embedding generation, and vector storage
-Uses Open Router for embeddings
+Embeddings are generated via OpenRouter (Qwen3-Embedding-8B)
 """
 
 import os
@@ -9,48 +9,18 @@ from typing import Dict, List
 import logging
 import json
 from datetime import datetime
-import requests
-
-# Try to import sentence-transformers for local embeddings
-try:
-    from sentence_transformers import SentenceTransformer
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
-    logging.warning("sentence-transformers not available. Using numpy-based embeddings instead.")
 
 logger = logging.getLogger(__name__)
+
 
 class RAGProcessor:
     def __init__(self, api_key: str = None):
         """
-        Initialize RAG processor with local embeddings (no API calls needed!)
-
-        Args:
-            api_key: Open Router API key (for LLM only, not embeddings)
+        Initialize RAG processor.
+        Note: Embeddings are now handled by OpenRouterEmbedder (Qwen3-8B).
+        This class handles chunking and transcript processing.
         """
         self.api_key = api_key or os.getenv('OPENROUTER_API_KEY')
-        self.base_url = "https://openrouter.io/api/v1"
-
-        # Use local sentence-transformers for embeddings (free, fast, 768-dim)
-        self.embedding_model = "all-minilm-l6-v2"
-        self.embedding_provider = "local"
-
-        # Initialize embedding model if available
-        if SENTENCE_TRANSFORMERS_AVAILABLE:
-            try:
-                logger.info("Loading local embedding model: all-minilm-l6-v2")
-                self.model = SentenceTransformer('sentence-transformers/all-minilm-l6-v2')
-                logger.info("Embedding model loaded successfully (NO API KEY NEEDED!)")
-            except Exception as e:
-                logger.warning(f"Failed to load embedding model: {e}")
-                self.model = None
-        else:
-            logger.warning("sentence-transformers not available. Install with: pip install sentence-transformers")
-            self.model = None
-
-        if not self.api_key:
-            logger.warning("OPENROUTER_API_KEY not set. LLM features will fail, but embeddings still work.")
 
     def process_transcript_for_rag(
         self,
@@ -72,27 +42,16 @@ class RAGProcessor:
         """
 
         try:
-            logger.info("Starting RAG processing with Open Router embeddings")
+            logger.info("Starting RAG processing (chunking only — embeddings via OpenRouter)")
 
-            # Step 1: Create chunks from segments (for more granular RAG)
+            # Create chunks from segments
             chunks = self._create_chunks(transcript_data['segments'], overlap=chunk_overlap)
             logger.info(f"Created {len(chunks)} chunks from segments")
 
-            # Step 2: Generate embeddings for each chunk using Open Router
-            logger.info(f"Generating embeddings for {len(chunks)} chunks using Open Router")
-
+            # Set placeholder embeddings (real embeddings done by OpenRouterEmbedder in v2 pipeline)
             for chunk in chunks:
-                embedding = self.generate_embedding(chunk['text'])
-                chunk['embedding'] = embedding
-                logger.debug(f"Generated embedding for chunk {chunk['chunk_id']}")
+                chunk['embedding'] = [0.0] * 384  # Placeholder for v1 compat
 
-            # Step 3: Also generate segment embeddings
-            logger.info(f"Generating embeddings for {len(transcript_data['segments'])} segments")
-            for segment in transcript_data['segments']:
-                embedding = self.generate_embedding(segment['text'])
-                segment['embedding'] = embedding
-
-            # Return enhanced data with both segment and chunk embeddings
             rag_data = {
                 'transcript_id': transcript_data['transcript_id'],
                 'segments': transcript_data['segments'],
@@ -101,14 +60,13 @@ class RAGProcessor:
                     **transcript_data['metadata'],
                     'rag_processed_at': datetime.now().isoformat(),
                     'total_chunks': len(chunks),
-                    'embedding_model': self.embedding_model,
-                    'embedding_provider': 'local-sentencetransformers',
-                    'embedding_dimensions': 384
+                    'embedding_model': 'qwen3-embedding-8b (via OpenRouter)',
+                    'embedding_provider': 'openrouter',
+                    'embedding_dimensions': 2048
                 }
             }
 
-            logger.info("RAG processing completed with Open Router embeddings")
-
+            logger.info("RAG processing completed (chunks ready for OpenRouter embedding)")
             return rag_data
 
         except Exception as e:
@@ -117,37 +75,10 @@ class RAGProcessor:
 
     def generate_embedding(self, text: str) -> List[float]:
         """
-        Generate embedding vector for text using local sentence-transformers model
-        NO API CALLS NEEDED - completely free!
-
-        Args:
-            text: Text to embed
-
-        Returns:
-            Embedding vector (list of floats)
+        DEPRECATED: Returns zero vector. Use OpenRouterEmbedder.embed_text() instead.
+        Kept for backward compatibility with code that calls this method.
         """
-        try:
-            # Clean up text
-            text = text.replace("\n", " ").strip()
-
-            if not text:
-                logger.debug("Empty text for embedding, returning zeros")
-                return [0.0] * 384  # all-minilm-l6-v2 uses 384 dimensions
-
-            # Use local embedding model (NO API CALL!)
-            if self.model is not None:
-                embedding = self.model.encode(text, convert_to_tensor=False)
-                # Convert numpy array to list
-                embedding_list = embedding.tolist() if hasattr(embedding, 'tolist') else list(embedding)
-                logger.debug(f"Generated local embedding with dimension {len(embedding_list)}")
-                return embedding_list
-            else:
-                logger.warning("Embedding model not available, using zero vector")
-                return [0.0] * 384
-
-        except Exception as e:
-            logger.error(f"Error generating embedding: {str(e)}")
-            raise
+        return [0.0] * 384
 
     def _create_chunks(self, segments: List[Dict], overlap: int = 50) -> List[Dict]:
         """

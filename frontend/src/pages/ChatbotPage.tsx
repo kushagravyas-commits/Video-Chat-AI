@@ -65,6 +65,7 @@ interface VideoEntry {
 
 interface ClipOptions {
     total_mentions: number;
+    default_topic?: string;
 }
 
 export default function ChatbotPage() {
@@ -267,8 +268,15 @@ export default function ChatbotPage() {
         return null;
     };
 
-    const handleGenerateClips = (options: { quantity: number; grouping: boolean; style: string }) => {
-        const cmd = `[SYSTEM COMMAND EXECUTED BY USER UI]\nAction: Extract top ${options.quantity} mentions into clips.\nGrouping: ${options.grouping}\nStyle: ${options.style}\nProceed immediately with "create_clips_from_mentions" without asking any questions.`;
+    const handleGenerateClips = (options: { quantity: number; grouping: boolean; style: string; topic: string }) => {
+        let cmd: string;
+        if (options.topic) {
+            // Has topic → search mentions for that topic, then create clips
+            cmd = `[SYSTEM COMMAND EXECUTED BY USER UI]\nAction: First call count_mentions_in_video with search_query="${options.topic}", then create ${options.quantity} clips from those mentions.\nGrouping: ${options.grouping}\nStyle: ${options.style}\nTopic: ${options.topic}\nProceed immediately without asking any questions.`;
+        } else {
+            // No topic → use find_diverse_highlights to auto-find interesting moments
+            cmd = `[SYSTEM COMMAND EXECUTED BY USER UI]\nAction: Call find_diverse_highlights with num_clips=${options.quantity}.\nProceed immediately without asking any questions.`;
+        }
         handleSendMessage(undefined, cmd);
     };
 
@@ -548,8 +556,9 @@ export default function ChatbotPage() {
                                                 {/* Render Rich UI Components if JSON was found */}
                                                 {mentionData && <MentionResultsCard data={mentionData} />}
                                                 {clipOptionsData && (
-                                                    <ClipOptionsCard 
-                                                        totalMentions={clipOptionsData.total_mentions} 
+                                                    <ClipOptionsCard
+                                                        totalMentions={clipOptionsData.total_mentions}
+                                                        defaultTopic={clipOptionsData.default_topic || ''}
                                                         onGenerate={handleGenerateClips}
                                                         isGenerating={isThinking}
                                                     />

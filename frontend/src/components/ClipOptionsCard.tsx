@@ -1,16 +1,19 @@
 import React, { useState } from 'react';
-import { Settings, Scissors, Users, Play, GripVertical, Wand2, Clock, Check } from 'lucide-react';
+import { Settings, Scissors, Users, Play, GripVertical, Wand2, Clock, Check, MessageSquare } from 'lucide-react';
 
 interface ClipOptionsCardProps {
-  totalMentions: number;
-  onGenerate: (options: { quantity: number; grouping: boolean; style: string }) => void;
+  totalMentions?: number;
+  defaultTopic?: string;
+  onGenerate: (options: { quantity: number; grouping: boolean; style: string; topic: string }) => void;
   isGenerating?: boolean;
 }
 
-export function ClipOptionsCard({ totalMentions, onGenerate, isGenerating = false }: ClipOptionsCardProps) {
-  const [quantity, setQuantity] = useState<number>(Math.min(5, totalMentions));
+export function ClipOptionsCard({ totalMentions = 5, defaultTopic = '', onGenerate, isGenerating = false }: ClipOptionsCardProps) {
+  const [quantity, setQuantity] = useState<number>(Math.min(5, Math.max(totalMentions, 1)));
+  const [quantityInput, setQuantityInput] = useState<string>(String(Math.min(5, Math.max(totalMentions, 1))));
   const [grouping, setGrouping] = useState<boolean>(true);
   const [style, setStyle] = useState<string>('ai_director');
+  const [topic, setTopic] = useState<string>(defaultTopic);
 
   const styles = [
     {
@@ -34,7 +37,7 @@ export function ClipOptionsCard({ totalMentions, onGenerate, isGenerating = fals
   ];
 
   const handleGenerate = () => {
-    onGenerate({ quantity, grouping, style });
+    onGenerate({ quantity, grouping, style, topic: topic.trim() });
   };
 
   return (
@@ -45,30 +48,45 @@ export function ClipOptionsCard({ totalMentions, onGenerate, isGenerating = fals
           <h3 className="font-semibold text-slate-200">Clip Generation Settings</h3>
         </div>
         <div className="text-xs bg-blue-500/20 text-blue-300 px-2 py-1 rounded border border-blue-500/30 font-medium">
-          {totalMentions} Mentions Found
+          {totalMentions > 0 ? `${totalMentions} Mentions Found` : 'AI Clip Maker'}
         </div>
       </div>
 
       <div className="p-4 space-y-5">
+        {/* Topic input */}
+        <div className="space-y-2">
+          <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+            <MessageSquare className="w-3 h-3" /> Topic (optional)
+          </label>
+          <input
+            type="text"
+            value={topic}
+            onChange={(e) => setTopic(e.target.value)}
+            placeholder="e.g. 'Iran and India friendship' or leave empty for AI to decide"
+            disabled={isGenerating}
+            className="w-full px-3 py-2 rounded border bg-slate-800 border-slate-700 text-slate-200 text-sm placeholder:text-slate-500 focus:border-blue-500/50 focus:outline-none disabled:opacity-50"
+          />
+          <p className="text-[10px] text-slate-500">Leave empty to let AI pick the best moments automatically</p>
+        </div>
+
         {/* Quantity control */}
         <div className="space-y-2">
           <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-            <Scissors className="w-3 h-3" /> Quantity to Make
+            <Scissors className="w-3 h-3" /> Number of Clips
           </label>
-          <div className="flex items-center gap-3">
-            <input
-              type="range"
-              min="1"
-              max={totalMentions}
-              value={quantity}
-              onChange={(e) => setQuantity(Number(e.target.value))}
-              className="flex-1 accent-blue-500"
-              disabled={isGenerating}
-            />
-            <div className="bg-slate-800 text-blue-300 font-mono px-3 py-1 rounded border border-slate-700 min-w-12 text-center text-sm font-semibold">
-              {quantity}
-            </div>
-          </div>
+          <input
+            type="text"
+            value={quantityInput}
+            onChange={(e) => setQuantityInput(e.target.value)}
+            onBlur={() => {
+              const val = parseInt(quantityInput);
+              if (!isNaN(val) && val >= 1) { setQuantity(val); setQuantityInput(String(val)); }
+              else { setQuantity(1); setQuantityInput('1'); }
+            }}
+            placeholder="Enter a number"
+            disabled={isGenerating}
+            className="w-full px-3 py-2 rounded border bg-slate-800 border-slate-700 text-slate-200 text-sm font-mono focus:border-blue-500/50 focus:outline-none disabled:opacity-50"
+          />
         </div>
 
         {/* Grouping Toggle */}

@@ -182,7 +182,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "create_highlight_clip",
-            "description": "Create and RENDER a permanent highlight reel MP4 file by combining multiple video segments. Use this when the user asks for 'highlights', 'a highlight reel', or 'a summary video'. Returns the disk path to the rendered video file.",
+            "description": "INTERNAL TOOL — DO NOT call directly unless you receive [SYSTEM COMMAND EXECUTED BY USER UI]. Creates a highlight reel MP4 from video segments.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -280,8 +280,30 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "find_diverse_highlights",
+            "description": "INTERNAL TOOL — DO NOT call directly. Only called by the UI system command. Creates diverse highlight clips from different parts of the video using text + visual search.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "video_id": {
+                        "type": "string",
+                        "description": "Video ID to create highlights from"
+                    },
+                    "num_clips": {
+                        "type": "integer",
+                        "default": 2,
+                        "description": "Number of highlight clips to create (each from a different part of the video)"
+                    }
+                },
+                "required": ["video_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_clips_from_mentions",
-            "description": "Create video clips from mention timestamps. Supports smart grouping of nearby mentions and customizable clip duration.",
+            "description": "INTERNAL TOOL — DO NOT call directly unless you receive [SYSTEM COMMAND EXECUTED BY USER UI]. Creates clips from mention timestamps.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -454,40 +476,50 @@ Result: 15 mentions at timestamps 0:45, 2:30, 5:15, ...
 You: Display results with table, timeline, and stats
 You: Ask: "Would you like me to create video clips for each mention?"
 
-## Clip Generation Workflow (Phase 2)
+## Clip Generation Workflow
 
-When user wants to create clips from mentions:
+When user asks ANYTHING about creating clips, making clips, viral clips, highlights, or wants video clips:
+- "make clips", "I want clips", "create viral clips", "make highlights", "clip this", etc.
 
-### CRITICAL: Always Ask Permission First
-1. User asks about creating clips ("Can you make clips?", "Create clips for these mentions")
-2. Show the mentions and ask: "Found X mentions. Would you like me to create video clips for these?"
-3. **NEVER auto-create clips** - Always wait for explicit "Yes"
+RULES:
+1. Do NOT call find_diverse_highlights, create_highlight_clip, or create_clips_from_mentions directly
+2. Do NOT call count_mentions_in_video for clip requests
+3. ONLY output the JSON block below — nothing else
+4. The UI card will appear, user will configure settings, THEN the UI sends [SYSTEM COMMAND] which triggers the tools
 
-### Preference Collection Flow (STRICT UI ENFORCEMENT)
-The UI handles the collection of clip preferences using a special interactive card. You MUST NOT try to ask the user these questions conversationally. 
+You MUST IMMEDIATELY output this JSON block. Do NOT call any tools. Do NOT ask questions.
 
-When you ask "Would you like me to create video clips for any of these mentions?" (or the user asks up-front), you MUST include the following JSON block EXACTLY as shown. The frontend will intercept this JSON and render a beautiful form with buttons for the user to click.
-
-Output this EXACT JSON format:
 ```json
 {
   "type": "clip_options",
   "data": {
-    "total_mentions": X
+    "total_mentions": 5,
+    "default_topic": ""
   }
 }
 ```
-Replace X with the total number of mentions found.
 
-**CRITICAL RULE:** DO NOT output any other text explaining the options. The UI handles EVERYTHING.
+RULES:
+- `total_mentions`: Set to the number of mentions from the most recent mention search, or 5 if no recent search
+- `default_topic`: Auto-fill from the most recent mention search query. If user searched "propaganda" earlier, set this to "propaganda". If no recent search, leave as empty string ""
+- Do NOT ask "what topic?" or "what do you want clips about?" — the UI card has a topic field the user can fill
+- Do NOT output any other text — ONLY the JSON block
+- The UI card lets the user set: topic, quantity, grouping, style — all in the card
 
 ### Handling UI Button Clicks
-When the user clicks the "Generate Clips" button on the UI card, the frontend will send you a hidden message starting with `[SYSTEM COMMAND EXECUTED BY USER UI]`. 
+When you receive `[SYSTEM COMMAND EXECUTED BY USER UI]`, execute IMMEDIATELY. No confirmation, no questions.
 
-For example:
-`[SYSTEM COMMAND EXECUTED BY USER UI]\nAction: Extract top 5 mentions into clips.\nGrouping: true\nStyle: ai_director\nProceed immediately with "create_clips_from_mentions" without asking any questions.`
+Two scenarios:
 
-When you receive a `[SYSTEM COMMAND EXECUTED BY USER UI]`, you MUST IMMEDIATELY call the `create_clips_from_mentions` tool using the EXACT settings provided in the command. DO NOT ask for confirmation. DO NOT say "Okay, I will do that." Just execute the tool call instantly.
+**With Topic** (e.g., "Topic: propaganda"):
+1. Call `count_mentions_in_video` with the topic as search_query
+2. Then call `create_clips_from_mentions` with the results
+
+**Without Topic** (e.g., "Use create_highlight_clip"):
+1. Call `search_video_context` with queries like "key discussion", "main argument", "important point" to find diverse interesting segments
+2. Call `create_highlight_clip` for EACH clip separately with different segments from the search results
+3. DO NOT call count_mentions_in_video — there is no topic to search for
+4. DO NOT search for "best moments" or "highlights" as a mention query — that's meaningless
 
 
 ### Calling create_clips_from_mentions
@@ -645,6 +677,31 @@ class MasterAgent:
         # Add user message to conversation
         self.messages.append({"role": "user", "content": video_context})
 
+        # FAST PATH: Clip-making requests → return card JSON instantly, no LLM call
+        clip_keywords = ['make clip', 'create clip', 'viral clip', 'make viral', 'want clip',
+                         'generate clip', 'make highlight', 'create highlight', 'clip bana',
+                         'i want to make', 'make me clip', 'cut clip', 'make clips']
+        user_lower = user_message.lower()
+        is_clip_request = any(kw in user_lower for kw in clip_keywords)
+        is_system_command = '[SYSTEM COMMAND EXECUTED BY USER UI]' in user_message
+
+        if is_clip_request and not is_system_command:
+            last_query = self.session_data.get('last_mention_query', '')
+            last_count = self.session_data.get('last_mention_count', 5)
+            clip_json = json.dumps({
+                "type": "clip_options",
+                "data": {
+                    "total_mentions": max(last_count, 5),
+                    "default_topic": last_query
+                }
+            }, indent=2)
+            card_text = f"```json\n{clip_json}\n```"
+            logger.info(f"FAST PATH: Clip request detected, returning card instantly")
+            self.messages.append({"role": "assistant", "content": card_text})
+            if self.callback:
+                self.callback({"type": "answer", "content": card_text})
+            return card_text
+
         max_iterations = 15  # Safety limit for tool-calling loops
         iteration = 0
 
@@ -749,6 +806,30 @@ class MasterAgent:
                     logger.info(f"INJECTING display_json into response ({len(pending_json)} chars)")
                     final_text = pending_json + "\n\nWould you like me to create video clips for any of these mentions?"
 
+                # Inject clip_options card if user asked for clips but LLM didn't output the JSON
+                if not pending_json and 'clip_options' not in final_text:
+                    last_user_msg = ""
+                    for m in reversed(self.messages):
+                        if m.get('role') == 'user':
+                            last_user_msg = m.get('content', '').lower()
+                            break
+                    clip_keywords = ['make clip', 'create clip', 'viral clip', 'make viral', 'want clip',
+                                     'generate clip', 'make highlight', 'create highlight', 'clip bana',
+                                     'i want to make', 'make me clip', 'cut clip']
+                    if any(kw in last_user_msg for kw in clip_keywords):
+                        # Auto-fill topic from last mention search
+                        last_query = self.session_data.get('last_mention_query', '')
+                        last_count = self.session_data.get('last_mention_count', 5)
+                        clip_json = json.dumps({
+                            "type": "clip_options",
+                            "data": {
+                                "total_mentions": max(last_count, 5),
+                                "default_topic": last_query
+                            }
+                        }, indent=2)
+                        final_text = f"```json\n{clip_json}\n```"
+                        logger.info(f"INJECTING clip_options (topic='{last_query}', count={last_count})")
+
                 # Inject visual findings if the LLM ignored them
                 pending_visual = self.session_data.pop('pending_visual_answer', None)
                 if pending_visual and not pending_json:
@@ -810,6 +891,8 @@ class MasterAgent:
                 return self._tool_index_video_visuals(args)
             elif tool_name == "search_image_context_from_video":
                 return self._tool_search_image_context(args)
+            elif tool_name == "find_diverse_highlights":
+                return self._tool_find_diverse_highlights(args)
             elif tool_name == "create_clips_from_mentions":
                 return self._tool_create_clips_from_mentions(args)
             elif tool_name == "generate_viral_short":
@@ -1196,9 +1279,48 @@ class MasterAgent:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
+    def _resolve_video_path_from_session(self, video_path: str = '', video_id: str = '') -> str:
+        """Resolve actual video file path from session, args, or disk search."""
+        # Try explicit path
+        if video_path and os.path.isfile(video_path):
+            return video_path
+
+        # Try session
+        session_path = self.session_data.get('last_video_path', '')
+        if session_path and os.path.isfile(session_path):
+            return session_path
+
+        # Try video_id from args or session
+        vid = video_id or self.session_data.get('last_video_id', '')
+        if not vid:
+            ref_ids = self.session_data.get('reference_video_ids', [])
+            if ref_ids:
+                vid = ref_ids[0]
+
+        if vid:
+            base_dir = Path("./storage/videos") / vid
+            if base_dir.exists():
+                for ext in ['.mp4', '.mkv', '.avi', '.webm', '']:
+                    candidate = base_dir / f"video{ext}" if ext else base_dir / "video"
+                    if candidate.exists():
+                        resolved = str(candidate.resolve())
+                        self.session_data['last_video_path'] = resolved
+                        logger.info(f"Resolved video path: {vid} -> {resolved}")
+                        return resolved
+                # Try any file in directory
+                for f in base_dir.iterdir():
+                    if f.is_file() and (f.suffix.lower() in ('.mp4', '.mkv', '.avi', '.webm') or f.stat().st_size > 1_000_000):
+                        resolved = str(f.resolve())
+                        self.session_data['last_video_path'] = resolved
+                        logger.info(f"Resolved video path: {vid} -> {resolved}")
+                        return resolved
+
+        logger.error(f"Could not resolve video path (path='{video_path}', id='{vid}')")
+        return ''
+
     def _tool_trim_video(self, args: Dict) -> Dict:
         """Trim a video to a specific time range"""
-        video_path = args.get("video_path", self.session_data.get('last_video_path', ''))
+        video_path = self._resolve_video_path_from_session(args.get("video_path", ''), args.get("video_id", ''))
         start = args.get("start_seconds", 0)
         end = args.get("end_seconds", 0)
         output_name = args.get("output_name", None)
@@ -1220,7 +1342,7 @@ class MasterAgent:
 
     def _tool_create_highlights(self, args: Dict) -> Dict:
         """Create a highlight reel from multiple segments"""
-        video_path = args.get("video_path", self.session_data.get('last_video_path', ''))
+        video_path = self._resolve_video_path_from_session(args.get("video_path", ''), args.get("video_id", ''))
         segments = args.get("segments", [])
         output_name = args.get("output_name", None)
 
@@ -1356,6 +1478,9 @@ class MasterAgent:
             result = self._format_mention_results_json(result)
             if result.get('display_json'):
                 self.session_data['pending_display_json'] = result['display_json']
+            # Save for clip auto-fill
+            self.session_data['last_mention_query'] = search_query
+            self.session_data['last_mention_count'] = result.get('total_count', 0)
             return result
 
         except Exception as e:
@@ -1528,6 +1653,217 @@ class MasterAgent:
             logger.error(f"Visual search failed: {e}")
             return {"status": "error", "message": f"Visual search failed: {str(e)}"}
 
+    def _tool_find_diverse_highlights(self, args: Dict) -> Dict:
+        """Find diverse highlight moments and create clips from different parts of the video."""
+        try:
+            video_id = args.get("video_id", "")
+            num_clips = args.get("num_clips", 2)
+
+            if not video_id:
+                # Try session
+                ref_ids = self.session_data.get('reference_video_ids', [])
+                video_id = ref_ids[0] if ref_ids else self.session_data.get('last_video_id', '')
+
+            if not video_id:
+                return {"status": "error", "message": "No video_id provided"}
+
+            video_path = self._resolve_video_path_from_session('', video_id)
+            if not video_path:
+                return {"status": "error", "message": f"Video file not found for {video_id}"}
+
+            if self.callback:
+                self.callback({"type": "status", "content": f"Finding {num_clips} diverse highlights across the video..."})
+
+            # 1. Load ALL transcript segments to get video duration
+            transcript_path = f"./storage/transcripts/{video_id}_transcript.json"
+            if not os.path.exists(transcript_path):
+                return {"status": "error", "message": f"Transcript not found for {video_id}"}
+
+            with open(transcript_path, 'r', encoding='utf-8') as f:
+                transcript_data = json.load(f)
+
+            segments = transcript_data.get('segments', [])
+            if not segments:
+                return {"status": "error", "message": "No transcript segments found"}
+
+            duration = max(s.get('end_time', 0) for s in segments)
+            logger.info(f"Video {video_id}: {len(segments)} segments, {duration:.0f}s duration, making {num_clips} clips")
+
+            # 2. Divide timeline into equal windows
+            window_size = duration / num_clips
+            windows = []
+            for i in range(num_clips):
+                windows.append({
+                    'start': i * window_size,
+                    'end': (i + 1) * window_size,
+                    'index': i
+                })
+
+            # 3. Search queries for finding interesting content
+            TEXT_QUERIES = [
+                "important argument or key point being made",
+                "emotional dramatic powerful statement",
+                "surprising revelation or shocking fact",
+                "strong opinion bold controversial claim",
+                "funny entertaining humorous moment"
+            ]
+            VISUAL_QUERIES = [
+                "dramatic expressive scene",
+                "important visual graphic chart"
+            ]
+
+            # 4. For each window, find the best moment
+            highlight_segments = []
+            for window in windows:
+                best_score = 0
+                best_start = window['start'] + window_size * 0.3  # Default: 30% into window
+                best_text = ""
+
+                if self.callback:
+                    self.callback({"type": "status", "content": f"Searching window {window['index']+1}/{num_clips} ({self._fmt_time(window['start'])} - {self._fmt_time(window['end'])})..."})
+
+                # Search text embeddings
+                if self.openrouter_embedder:
+                    for query in TEXT_QUERIES[:3]:  # Use top 3 queries
+                        try:
+                            query_emb = self.openrouter_embedder.embed_text_for_retrieval(query)
+                            results = self.chroma_store.search_v2(
+                                query_embedding=query_emb,
+                                video_ids=[video_id],
+                                threshold=0.2,
+                                top_k=20
+                            )
+                            for r in results:
+                                t = float(r['metadata'].get('start_time', 0))
+                                if window['start'] <= t < window['end'] and r['similarity'] > best_score:
+                                    best_score = r['similarity']
+                                    best_start = t
+                                    best_text = r.get('text', '')[:100]
+                        except Exception as e:
+                            logger.debug(f"Text search failed for query '{query}': {e}")
+
+                    # Search visual embeddings
+                    for query in VISUAL_QUERIES[:2]:
+                        try:
+                            query_emb = self.openrouter_embedder.embed_visual_query(query)
+                            results = self.chroma_store.search_visual(
+                                query_embedding=query_emb,
+                                video_ids=[video_id],
+                                threshold=0.1,
+                                top_k=10
+                            )
+                            for r in results:
+                                t = float(r['metadata'].get('start_time', 0))
+                                if window['start'] <= t < window['end'] and r['similarity'] > best_score:
+                                    best_score = r['similarity']
+                                    best_start = t
+                                    best_text = f"[Visual] {r.get('text', '')[:100]}"
+                        except Exception as e:
+                            logger.debug(f"Visual search failed for query '{query}': {e}")
+
+                # Build clip with minimum 20 seconds, snapped to sentence boundaries
+                MIN_CLIP_DURATION = 20
+
+                # Find segment closest to best_start
+                best_seg_idx = 0
+                for idx, seg in enumerate(segments):
+                    if seg.get('end_time', 0) >= best_start:
+                        best_seg_idx = idx
+                        break
+
+                # Step 1: Go backward to find a clean sentence start (max 5 segments back)
+                clip_start_idx = best_seg_idx
+                for idx in range(best_seg_idx - 1, max(best_seg_idx - 5, -1), -1):
+                    if idx < 0 or segments[idx].get('start_time', 0) < window['start'] - 3:
+                        break
+                    if segments[idx].get('text', '').strip().endswith(('.', '!', '?')):
+                        clip_start_idx = idx + 1  # Start AFTER the sentence-ending segment
+                        break
+                    clip_start_idx = idx
+
+                clip_start_time = segments[clip_start_idx].get('start_time', 0)
+                min_end_time = clip_start_time + MIN_CLIP_DURATION
+
+                # Step 2: Go forward past min_end_time, THEN find next sentence boundary
+                clip_end_idx = best_seg_idx
+                passed_minimum = False
+                for idx in range(best_seg_idx, min(len(segments), best_seg_idx + 30)):
+                    seg_end = segments[idx].get('end_time', 0)
+                    seg_text = segments[idx].get('text', '').strip()
+                    clip_end_idx = idx
+
+                    if seg_end >= min_end_time:
+                        passed_minimum = True
+
+                    # Only stop at sentence boundary AFTER passing minimum duration
+                    if passed_minimum and seg_text.endswith(('.', '!', '?')):
+                        break
+
+                    # Hard stop if way past window
+                    if seg_end > window['end'] + 30:
+                        break
+
+                clip_start = max(0, segments[clip_start_idx].get('start_time', 0) - 0.3)
+                clip_end = min(duration, segments[clip_end_idx].get('end_time', 0) + 0.3)
+
+                # Absolute safety: if still too short, just extend to min duration
+                if clip_end - clip_start < MIN_CLIP_DURATION:
+                    clip_end = min(duration, clip_start + MIN_CLIP_DURATION)
+
+                highlight_segments.append({
+                    'start_seconds': clip_start,
+                    'end_seconds': clip_end,
+                    'score': best_score,
+                    'preview': best_text
+                })
+
+                logger.info(f"  Window {window['index']+1}: best at {self._fmt_time(best_start)} (score={best_score:.3f}) | {best_text[:50]}")
+
+            # 5. Create clips (with unique timestamps to avoid overwriting old clips)
+            created_clips = []
+            metadata = self.session_data.get('last_metadata', {})
+            video_title = metadata.get('title', video_id).replace(' ', '_')[:30]
+            from datetime import datetime as dt
+            timestamp = dt.now().strftime('%Y%m%d_%H%M%S')
+
+            for i, seg in enumerate(highlight_segments):
+                try:
+                    output_name = f"{video_id}_highlight_{i+1}_{timestamp}"
+                    output_path = self.video_tools.create_highlight_clip(
+                        video_path=video_path,
+                        segments=[{'start_seconds': seg['start_seconds'], 'end_seconds': seg['end_seconds']}],
+                        output_name=output_name
+                    )
+                    file_size = os.path.getsize(output_path) / (1024 * 1024) if os.path.exists(output_path) else 0
+
+                    created_clips.append({
+                        "clip_number": i + 1,
+                        "output_path": output_path,
+                        "start_time": self._fmt_time(seg['start_seconds']),
+                        "end_time": self._fmt_time(seg['end_seconds']),
+                        "duration": f"{seg['end_seconds'] - seg['start_seconds']:.1f}s",
+                        "file_size": f"{file_size:.1f} MB",
+                        "preview": seg['preview']
+                    })
+                    logger.info(f"Created highlight clip {i+1}: {output_path}")
+                except Exception as e:
+                    logger.error(f"Failed to create highlight clip {i+1}: {e}")
+
+            if not created_clips:
+                return {"status": "error", "message": "Failed to create any highlight clips"}
+
+            return {
+                "status": "success",
+                "video_id": video_id,
+                "clips_created": len(created_clips),
+                "clips": created_clips,
+                "message": f"Created {len(created_clips)} diverse highlight clips from different parts of the video"
+            }
+
+        except Exception as e:
+            logger.error(f"Diverse highlights failed: {e}")
+            return {"status": "error", "message": f"Failed: {str(e)}"}
+
     def _tool_create_clips_from_mentions(self, args: Dict) -> Dict:
         """Create video clips from mention timestamps"""
         try:
@@ -1549,25 +1885,8 @@ class MasterAgent:
 
             logger.info(f"Creating clips from {len(mentions)} mentions in {video_id} (expansion: {expansion_mode})")
 
-            # Get video path from session or disk
-            video_path = self.session_data.get('last_video_path', '')
-
-            # If not in session, try to find on disk
-            if not video_path or not os.path.exists(video_path):
-                potential_dirs = [
-                    Path("./storage/videos") / video_id,
-                    Path("./storage/videos") / video_id.replace('youtube_', '')
-                ]
-
-                for potential_dir in potential_dirs:
-                    if potential_dir.exists():
-                        for ext in ['.mp4', '.mkv', '.avi', '.webm', '']:
-                            v_file = potential_dir / f"video{ext}" if ext else potential_dir / "video"
-                            if v_file.exists():
-                                video_path = str(v_file.resolve())
-                                break
-                    if video_path:
-                        break
+            # Resolve video path
+            video_path = self._resolve_video_path_from_session('', video_id)
 
             if not video_path or not os.path.exists(video_path):
                 logger.error(f"Video file not found for {video_id}")
